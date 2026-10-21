@@ -7,6 +7,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import io.github.avohra25.jraft.check.InvariantChecker;
 import io.github.avohra25.jraft.check.History;
 import io.github.avohra25.jraft.kv.KvStore;
 import io.github.avohra25.jraft.raft.LogEntry;
@@ -25,6 +26,7 @@ import io.github.avohra25.jraft.sim.Simulator;
 public final class Cluster implements RaftListener {
 
     public static final int CLIENT_BASE = 100;
+    private static final long CHECK_INTERVAL = 100;
 
     public static final class Builder {
         private int nodes = 5;
@@ -90,6 +92,7 @@ public final class Cluster implements RaftListener {
     private final List<KvClient> clients = new ArrayList<>();
     private final History history = new History();
     private final Timeline timeline = new Timeline();
+    private final InvariantChecker checker;
 
     private Cluster(Builder b) {
         sim = new Simulator(b.seed);
@@ -98,6 +101,7 @@ public final class Cluster implements RaftListener {
         for (int i = 0; i < b.nodes; i++) {
             ids.add(i);
         }
+        checker = new InvariantChecker(this::nodes, sim::now);
         for (int i = 0; i < b.nodes; i++) {
             int self = i;
             List<Integer> peers = ids.stream().filter(p -> p != self).toList();
@@ -121,6 +125,7 @@ public final class Cluster implements RaftListener {
     public void start() {
         timeline.add(sim.now(), "sim", "cluster of " + nodes.size() + " nodes started (seed " + sim.seed() + ")");
         nodes.forEach(RaftNode::start);
+        scheduleChecks();
     }
 
     /** Lets every client issue operations until simulated time {@code until}. */
@@ -176,6 +181,13 @@ public final class Cluster implements RaftListener {
             sim.runFor(10);
         }
         return true;
+    }
+
+    private void scheduleChecks() {
+        sim.schedule(CHECK_INTERVAL, () -> {
+            checker.checkAll();
+            scheduleChecks();
+        });
     }
 
     // ---------------------------------------------------------------- faults
@@ -248,6 +260,10 @@ public final class Cluster implements RaftListener {
         return timeline;
     }
 
+    public InvariantChecker checker() {
+        return checker;
+    }
+
     /** The running leader with the highest term, if any. */
     public Optional<RaftNode> leader() {
         return nodes.stream()
@@ -284,6 +300,7 @@ public final class Cluster implements RaftListener {
             case LEADER -> {
                 timeline.add(sim.now(), who, "became LEADER for term " + node.currentTerm()
                         + " (log last index " + node.log().lastIndex() + ")");
+                checker.onBecameLeader(node);
             }
             case FOLLOWER -> timeline.add(sim.now(), who, previous + " -> FOLLOWER, term " + node.currentTerm());
         }
@@ -291,9 +308,11 @@ public final class Cluster implements RaftListener {
 
     @Override
     public void onLeaderCommit(RaftNode leader, long commitIndex) {
+        checker.onLeaderCommit(leader, commitIndex);
     }
 
     @Override
     public void onApply(RaftNode node, LogEntry entry, String result) {
+        checker.onApply(node, entry);
     }
 }
