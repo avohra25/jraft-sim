@@ -51,7 +51,7 @@ class ChaosTest {
                 .nodes(nodes)
                 .seed(seed)
                 .network(Network.Config.lossy())
-                .raft(RaftConfig.defaults())
+                .raft(RaftConfig.defaults().withSnapshotThreshold(30))
                 .clients(3)
                 .keys(3)
                 .build();

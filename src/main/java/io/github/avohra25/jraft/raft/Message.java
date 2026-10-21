@@ -32,6 +32,11 @@ public sealed interface Message {
     record AppendEntriesReply(long term, boolean success, long matchIndex,
                               long conflictIndex, long conflictTerm) implements RaftRpc {}
 
+    record InstallSnapshot(long term, int leaderId, long lastIncludedIndex, long lastIncludedTerm,
+                           byte[] data) implements RaftRpc {}
+
+    record InstallSnapshotReply(long term, long matchIndex) implements RaftRpc {}
+
     record ClientRequest(Command.ClientCommand command) implements Message {}
 
     /** {@code leaderHint} is -1 when the contacted node does not know who the leader is. */

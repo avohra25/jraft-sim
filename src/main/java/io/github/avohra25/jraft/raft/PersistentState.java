@@ -1,7 +1,7 @@
 package io.github.avohra25.jraft.raft;
 
 /**
- * Everything a Raft node keeps on stable storage: current term, vote and log.
+ * Everything a Raft node keeps on stable storage: current term, vote, log and latest snapshot.
  *
  * <p>The simulator models a disk that survives crashes: the cluster owns one of these per node
  * and hands the same instance back on restart, while all volatile state is rebuilt from scratch.
@@ -15,6 +15,7 @@ public final class PersistentState {
     private final RaftLog log = new RaftLog();
     private long currentTerm;
     private int votedFor = NO_VOTE;
+    private byte[] snapshot;
     private long writes;
 
     public long currentTerm() {
@@ -46,6 +47,15 @@ public final class PersistentState {
             throw new IllegalStateException("already voted for " + votedFor + " in term " + currentTerm);
         }
         votedFor = candidate;
+        writes++;
+    }
+
+    public byte[] snapshot() {
+        return snapshot;
+    }
+
+    public void saveSnapshot(byte[] snapshot) {
+        this.snapshot = snapshot.clone();
         writes++;
     }
 

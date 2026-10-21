@@ -7,4 +7,10 @@ public interface StateMachine {
 
     /** Applies one committed command and returns its result (may be null). */
     String apply(Command command);
+
+    /** Serializes the full state, including anything needed for exactly-once semantics. */
+    byte[] snapshot();
+
+    /** Replaces the current state with a previously taken snapshot. */
+    void restore(byte[] snapshot);
 }

@@ -70,4 +70,32 @@ class RaftLogTest {
         assertThrows(IndexOutOfBoundsException.class, () -> log.entry(0));
         assertThrows(IndexOutOfBoundsException.class, () -> log.entry(2));
     }
+
+    @Test
+    void compactionKeepsAbsoluteIndexes() {
+        RaftLog log = logWithTerms(1, 1, 2, 3, 3);
+        log.compactThrough(3);
+        assertEquals(3, log.snapshotIndex());
+        assertEquals(2, log.snapshotTerm());
+        assertEquals(4, log.firstIndex());
+        assertEquals(5, log.lastIndex());
+        assertEquals(2, log.termAt(3));
+        assertEquals(3, log.termAt(4));
+        assertEquals(2, log.size());
+        assertThrows(IndexOutOfBoundsException.class, () -> log.entry(3));
+        assertThrows(IllegalStateException.class, () -> log.truncateFrom(3));
+        log.append(e(4, 6));
+        assertEquals(List.of(e(3, 5), e(4, 6)), log.slice(5, 10));
+    }
+
+    @Test
+    void resetToSnapshotDiscardsEverything() {
+        RaftLog log = logWithTerms(1, 2, 2);
+        log.resetToSnapshot(10, 5);
+        assertEquals(10, log.lastIndex());
+        assertEquals(5, log.lastTerm());
+        assertEquals(0, log.size());
+        log.append(e(5, 11));
+        assertEquals(11, log.lastIndex());
+    }
 }

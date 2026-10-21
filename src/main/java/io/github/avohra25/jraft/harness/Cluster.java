@@ -315,4 +315,11 @@ public final class Cluster implements RaftListener {
     public void onApply(RaftNode node, LogEntry entry, String result) {
         checker.onApply(node, entry);
     }
+
+    @Override
+    public void onSnapshot(RaftNode node, long lastIncludedIndex, boolean installed) {
+        timeline.add(sim.now(), "n" + node.id(), installed
+                ? "installed snapshot from leader through index " + lastIncludedIndex
+                : "compacted log into snapshot through index " + lastIncludedIndex);
+    }
 }

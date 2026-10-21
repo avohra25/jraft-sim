@@ -1,5 +1,12 @@
 package io.github.avohra25.jraft.kv;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -72,5 +79,64 @@ public final class KvStore implements StateMachine {
     /** Number of log entries applied to this instance (including no-ops and duplicates). */
     public long appliedCount() {
         return applied;
+    }
+
+    @Override
+    public byte[] snapshot() {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(bytes)) {
+            out.writeInt(data.size());
+            for (Map.Entry<String, String> e : data.entrySet()) {
+                writeString(out, e.getKey());
+                writeString(out, e.getValue());
+            }
+            // Sessions are part of the state: dropping them would let a retry execute twice.
+            TreeMap<Integer, Session> ordered = new TreeMap<>(sessions);
+            out.writeInt(ordered.size());
+            for (Map.Entry<Integer, Session> e : ordered.entrySet()) {
+                out.writeInt(e.getKey());
+                out.writeLong(e.getValue().seq());
+                writeString(out, e.getValue().result());
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return bytes.toByteArray();
+    }
+
+    @Override
+    public void restore(byte[] snapshot) {
+        data.clear();
+        sessions.clear();
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(snapshot))) {
+            int entries = in.readInt();
+            for (int i = 0; i < entries; i++) {
+                data.put(readString(in), readString(in));
+            }
+            int clients = in.readInt();
+            for (int i = 0; i < clients; i++) {
+                sessions.put(in.readInt(), new Session(in.readLong(), readString(in)));
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("corrupt snapshot", e);
+        }
+    }
+
+    private static void writeString(DataOutputStream out, String s) throws IOException {
+        if (s == null) {
+            out.writeInt(-1);
+            return;
+        }
+        byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);
+        out.writeInt(utf8.length);
+        out.write(utf8);
+    }
+
+    private static String readString(DataInputStream in) throws IOException {
+        int length = in.readInt();
+        if (length < 0) {
+            return null;
+        }
+        return new String(in.readNBytes(length), StandardCharsets.UTF_8);
     }
 }

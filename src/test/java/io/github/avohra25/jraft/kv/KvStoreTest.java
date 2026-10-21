@@ -37,4 +37,18 @@ class KvStoreTest {
         kv.apply(new Command.Append(7, 1, "k", "a"));
         assertEquals("abc", kv.get("k"));
     }
+
+    @Test
+    void snapshotRoundTripIncludesSessions() {
+        KvStore kv = new KvStore();
+        kv.apply(new Command.Put(1, 1, "k", "v\u00e9"));
+        kv.apply(new Command.Get(2, 1, "missing"));
+        kv.apply(new Command.Append(3, 4, "j", "w"));
+        KvStore copy = new KvStore();
+        copy.restore(kv.snapshot());
+        assertEquals(kv.data(), copy.data());
+        copy.apply(new Command.Append(3, 4, "j", "w")); // still deduplicated after restore
+        assertEquals("w", copy.get("j"));
+        assertNull(copy.apply(new Command.Get(2, 1, "missing")));
+    }
 }

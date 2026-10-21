@@ -12,6 +12,8 @@ import io.github.avohra25.jraft.raft.Message.AppendEntries;
 import io.github.avohra25.jraft.raft.Message.AppendEntriesReply;
 import io.github.avohra25.jraft.raft.Message.ClientReply;
 import io.github.avohra25.jraft.raft.Message.ClientRequest;
+import io.github.avohra25.jraft.raft.Message.InstallSnapshot;
+import io.github.avohra25.jraft.raft.Message.InstallSnapshotReply;
 import io.github.avohra25.jraft.raft.Message.RequestVote;
 import io.github.avohra25.jraft.raft.Message.RequestVoteReply;
 import io.github.avohra25.jraft.sim.Network;
@@ -89,6 +91,9 @@ public final class RaftNode {
         matchIndex.clear();
         stateMachine = stateMachineFactory.get();
         RaftLog log = disk.log();
+        if (disk.snapshot() != null) {
+            stateMachine.restore(disk.snapshot());
+        }
         // Only the snapshot is known to be committed; the rest is relearned from the leader.
         commitIndex = log.snapshotIndex();
         lastApplied = log.snapshotIndex();
@@ -271,6 +276,8 @@ public final class RaftNode {
             case RequestVoteReply m -> onRequestVoteReply(from, m);
             case AppendEntries m -> onAppendEntries(from, m);
             case AppendEntriesReply m -> onAppendEntriesReply(from, m);
+            case InstallSnapshot m -> onInstallSnapshot(from, m);
+            case InstallSnapshotReply m -> onInstallSnapshotReply(from, m);
             case ClientRequest m -> onClientRequest(from, m);
             case ClientReply m -> { } // servers never receive these
         }
@@ -376,6 +383,11 @@ public final class RaftNode {
     private void sendAppendEntries(int peer) {
         RaftLog log = disk.log();
         long next = nextIndex.get(peer);
+        if (next <= log.snapshotIndex()) {
+            send(peer, new InstallSnapshot(disk.currentTerm(), id, log.snapshotIndex(), log.snapshotTerm(),
+                    disk.snapshot()));
+            return;
+        }
         long prevIndex = next - 1;
         send(peer, new AppendEntries(disk.currentTerm(), id, prevIndex, log.termAt(prevIndex),
                 log.slice(next, config.maxEntriesPerAppend()), commitIndex));
@@ -441,6 +453,63 @@ public final class RaftNode {
             if (role == Role.LEADER && entry.command() instanceof Command.ClientCommand cmd) {
                 send(cmd.clientId(), new ClientReply(cmd.clientId(), cmd.seq(), true, result, id));
             }
+        }
+        maybeSnapshot();
+    }
+
+    // ---------------------------------------------------------------- log compaction
+
+    private void maybeSnapshot() {
+        RaftLog log = disk.log();
+        int threshold = config.snapshotThreshold();
+        if (threshold == 0 || lastApplied - log.snapshotIndex() < threshold) {
+            return;
+        }
+        // Write the snapshot before discarding the entries it replaces.
+        disk.saveSnapshot(stateMachine.snapshot());
+        log.compactThrough(lastApplied);
+        listener.onSnapshot(this, lastApplied, false);
+    }
+
+    private void onInstallSnapshot(int from, InstallSnapshot m) {
+        long term = disk.currentTerm();
+        if (m.term() < term) {
+            send(from, new InstallSnapshotReply(term, 0));
+            return;
+        }
+        if (role != Role.FOLLOWER) {
+            stepDown(m.term());
+        }
+        leaderId = m.leaderId();
+        resetElectionTimer();
+        long index = m.lastIncludedIndex();
+        if (index > commitIndex) {
+            RaftLog log = disk.log();
+            if (log.hasTermAt(index) && log.termAt(index) == m.lastIncludedTerm()) {
+                log.compactThrough(index); // keep the suffix we already have, it matches
+            } else {
+                log.resetToSnapshot(index, m.lastIncludedTerm());
+            }
+            disk.saveSnapshot(m.data());
+            stateMachine.restore(m.data());
+            commitIndex = index;
+            lastApplied = index;
+            listener.onSnapshot(this, index, true);
+        }
+        // Either way everything through `index` is committed, hence identical to the leader's.
+        send(from, new InstallSnapshotReply(term, index));
+    }
+
+    private void onInstallSnapshotReply(int from, InstallSnapshotReply m) {
+        if (role != Role.LEADER || m.term() != disk.currentTerm()) {
+            return;
+        }
+        long match = Math.max(matchIndex.get(from), m.matchIndex());
+        matchIndex.put(from, match);
+        nextIndex.put(from, Math.max(nextIndex.get(from), match + 1));
+        advanceCommitIndex();
+        if (nextIndex.get(from) <= disk.log().lastIndex()) {
+            sendAppendEntries(from);
         }
     }
 

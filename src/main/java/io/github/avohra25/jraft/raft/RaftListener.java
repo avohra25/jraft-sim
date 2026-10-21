@@ -9,4 +9,7 @@ public interface RaftListener {
     default void onLeaderCommit(RaftNode leader, long commitIndex) {}
 
     default void onApply(RaftNode node, LogEntry entry, String result) {}
+
+    /** {@code installed} is true when the snapshot came from the leader rather than local compaction. */
+    default void onSnapshot(RaftNode node, long lastIncludedIndex, boolean installed) {}
 }

@@ -121,4 +121,25 @@ public final class RaftLog {
         }
         return i;
     }
+
+    /** Discards entries through {@code index}, which becomes the new snapshot base. */
+    public void compactThrough(long index) {
+        if (index <= snapshotIndex) {
+            return;
+        }
+        if (index > lastIndex()) {
+            throw new IllegalArgumentException("cannot compact past last index " + lastIndex());
+        }
+        long term = termAt(index);
+        entries.subList(0, (int) (index - snapshotIndex)).clear();
+        snapshotIndex = index;
+        snapshotTerm = term;
+    }
+
+    /** Throws away the whole log and restarts it after an installed snapshot. */
+    public void resetToSnapshot(long index, long term) {
+        entries.clear();
+        snapshotIndex = index;
+        snapshotTerm = term;
+    }
 }
