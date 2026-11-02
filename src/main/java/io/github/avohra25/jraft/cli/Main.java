@@ -10,7 +10,7 @@ import io.github.avohra25.jraft.harness.Cluster;
 import io.github.avohra25.jraft.raft.RaftNode;
 import io.github.avohra25.jraft.sim.Network;
 
-/** {@code jraft-sim [--scenario NAME] [--seed N] [--nodes N] [--duration MS] [--verbose]} */
+/** {@code jraft-sim [--scenario NAME] [--seed N] [--nodes N] [--duration MS] [--verbose] [--unsafe-commit]} */
 public final class Main {
 
     private Main() {}
@@ -26,6 +26,7 @@ public final class Main {
         int nodes = 5;
         long duration = 6_000;
         boolean verbose = false;
+        boolean unsafeCommit = false;
         Iterator<String> it = Arrays.asList(args).iterator();
         try {
             while (it.hasNext()) {
@@ -36,6 +37,7 @@ public final class Main {
                     case "-n", "--nodes" -> nodes = Integer.parseInt(value(it, arg));
                     case "-d", "--duration" -> duration = Long.parseLong(value(it, arg));
                     case "-v", "--verbose" -> verbose = true;
+                    case "--unsafe-commit" -> unsafeCommit = true;
                     case "-l", "--list" -> {
                         for (Scenario s : Scenario.values()) {
                             out.printf("  %-10s %s%n", s.cliName(), s.description());
@@ -58,9 +60,13 @@ public final class Main {
             return 2;
         }
 
+        nodes = scenario.nodes(nodes);
         out.printf("scenario %s: %s%n", scenario.cliName(), scenario.description());
+        if (unsafeCommit) {
+            out.println("WARNING: --unsafe-commit lets leaders commit old-term entries by counting replicas (Figure 8 bug)");
+        }
         out.printf("seed %d, %d nodes, %dms of simulated time%n%n", seed, nodes, duration);
-        Scenario.Report report = scenario.run(new Scenario.Options(seed, nodes, duration, verbose));
+        Scenario.Report report = scenario.run(new Scenario.Options(seed, nodes, duration, verbose, unsafeCommit));
         Cluster cluster = report.cluster();
         out.print(cluster.timeline().render());
         out.println();
@@ -106,11 +112,14 @@ public final class Main {
     private static void usage(PrintStream out) {
         out.println("""
                 usage: jraft-sim [options]
-                  -s, --scenario NAME   election | partition | crash | snapshot | chaos (default election)
+                  -s, --scenario NAME   election | partition | crash | snapshot | figure8 | chaos
+                                        (default election)
                       --seed N          RNG seed; the same seed replays the exact same run (default 1)
                   -n, --nodes N         cluster size, 1-9 (default 5)
                   -d, --duration MS     simulated milliseconds of workload (default 6000)
                   -v, --verbose         also show every completed client operation
+                      --unsafe-commit   break the commit rule on purpose (Figure 8 bug) to see the
+                                        checkers report it
                   -l, --list            list scenarios""");
     }
 }

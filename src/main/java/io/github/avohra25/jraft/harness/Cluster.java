@@ -9,6 +9,7 @@ import java.util.stream.Collectors;
 
 import io.github.avohra25.jraft.check.InvariantChecker;
 import io.github.avohra25.jraft.check.History;
+import io.github.avohra25.jraft.kv.Command;
 import io.github.avohra25.jraft.kv.KvStore;
 import io.github.avohra25.jraft.raft.LogEntry;
 import io.github.avohra25.jraft.raft.Message;
@@ -26,6 +27,8 @@ import io.github.avohra25.jraft.sim.Simulator;
 public final class Cluster implements RaftListener {
 
     public static final int CLIENT_BASE = 100;
+    /** Sender id used by {@link #propose}; nothing listens on it, so replies are simply dropped. */
+    public static final int SCRIPT_CLIENT = 99;
     private static final long CHECK_INTERVAL = 100;
 
     public static final class Builder {
@@ -221,6 +224,38 @@ public final class Cluster implements RaftListener {
     public void isolate(int id) {
         network.isolate(id);
         timeline.add(sim.now(), "net", "ISOLATED n" + id);
+    }
+
+    /** Cuts the link between two nodes in both directions. */
+    public void disconnect(int a, int b) {
+        network.disconnect(a, b);
+        timeline.add(sim.now(), "net", "CUT n" + a + " <-> n" + b);
+    }
+
+    /** Makes node {@code id} start an election immediately (see {@link RaftNode#campaign()}). */
+    public void campaign(int id) {
+        timeline.add(sim.now(), "n" + id, "told to campaign");
+        nodes.get(id).campaign();
+    }
+
+    /**
+     * Hands {@code command} straight to node {@code id}, as a client request from a scripted
+     * client that never retries. Used by scenarios that need exact control over the log.
+     */
+    public void propose(int id, Command.ClientCommand command) {
+        timeline.add(sim.now(), "script", command + " -> n" + id);
+        network.send(SCRIPT_CLIENT, id, new Message.ClientRequest(command));
+    }
+
+    /** Executes simulator events one at a time until {@code condition} holds. */
+    public boolean stepUntil(java.util.function.BooleanSupplier condition, long timeout) {
+        long deadline = sim.now() + timeout;
+        while (!condition.getAsBoolean()) {
+            if (sim.now() >= deadline || !sim.step()) {
+                return condition.getAsBoolean();
+            }
+        }
+        return true;
     }
 
     public void heal() {

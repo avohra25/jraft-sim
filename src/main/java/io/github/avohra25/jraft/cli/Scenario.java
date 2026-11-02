@@ -4,6 +4,7 @@ import java.util.List;
 
 import io.github.avohra25.jraft.check.LinearizabilityChecker;
 import io.github.avohra25.jraft.harness.Cluster;
+import io.github.avohra25.jraft.harness.Figure8;
 import io.github.avohra25.jraft.harness.Nemesis;
 import io.github.avohra25.jraft.raft.RaftConfig;
 import io.github.avohra25.jraft.raft.RaftNode;
@@ -83,6 +84,38 @@ public enum Scenario {
         }
     },
 
+    FIGURE8("replay Figure 8 of the Raft paper: an old-term entry on a majority that must not count as committed") {
+        @Override
+        RaftConfig raftConfig() {
+            return Figure8.config(RaftConfig.defaults());
+        }
+
+        @Override
+        Network.Config networkConfig() {
+            return Figure8.network();
+        }
+
+        @Override
+        int nodes(int requested) {
+            return Figure8.NODES;
+        }
+
+        @Override
+        int clients() {
+            return 0;
+        }
+
+        @Override
+        void drive(Cluster cluster, Options options) {
+            Figure8.Outcome outcome = Figure8.drive(cluster);
+            cluster.timeline().add(cluster.sim().now(), "sim", String.format(
+                    "old entry was on a majority: %s; n0 had committed through index %d (a term-%d entry); "
+                            + "n4 elected with a divergent log: %s",
+                    outcome.oldEntryOnMajority() ? "yes" : "no", outcome.n0CommitIndex(),
+                    outcome.committedThroughTerm(), outcome.staleLeaderElected() ? "YES" : "no"));
+        }
+    },
+
     CHAOS("random crashes, restarts, partitions and leader isolation on a lossy network") {
         @Override
         RaftConfig raftConfig() {
@@ -97,7 +130,8 @@ public enum Scenario {
         }
     };
 
-    record Options(long seed, int nodes, long duration, boolean verbose) {}
+    /** {@code unsafeCommit} turns on the Figure 8 commit bug, to watch the checkers catch it. */
+    record Options(long seed, int nodes, long duration, boolean verbose, boolean unsafeCommit) {}
 
     private final String description;
 
@@ -113,6 +147,19 @@ public enum Scenario {
         return RaftConfig.defaults();
     }
 
+    Network.Config networkConfig() {
+        return Network.Config.lossy();
+    }
+
+    /** The cluster size this scenario runs with when {@code requested} nodes were asked for. */
+    int nodes(int requested) {
+        return requested;
+    }
+
+    int clients() {
+        return 3;
+    }
+
     abstract void drive(Cluster cluster, Options options);
 
     public String cliName() {
@@ -122,11 +169,11 @@ public enum Scenario {
     /** Builds a cluster, runs the scenario plus a quiet recovery period, and reports on it. */
     Report run(Options options) {
         Cluster cluster = Cluster.builder()
-                .nodes(options.nodes())
+                .nodes(nodes(options.nodes()))
                 .seed(options.seed())
-                .network(Network.Config.lossy())
-                .raft(raftConfig())
-                .clients(3)
+                .network(networkConfig())
+                .raft(raftConfig().withUnsafeCommitRule(options.unsafeCommit()))
+                .clients(clients())
                 .traceClients(options.verbose())
                 .build();
         cluster.start();

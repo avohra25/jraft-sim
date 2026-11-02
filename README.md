@@ -60,13 +60,14 @@ down, and the term-2 leader overwrites those entries.
 Requires JDK 21 and Maven 3.9+.
 
 ```sh
-mvn test                          # 1571 tests: unit tests + 1500 randomized fault-injection runs
+mvn test                          # 1583 tests: unit tests + 1500 randomized fault-injection runs
 mvn test -Dtest=ChaosTest -Dchaos.seeds=20000   # a much bigger sweep (about 30k runs, ~30s)
 
 mvn package -DskipTests
 java -jar target/jraft-sim-0.1.0.jar --list
 java -jar target/jraft-sim-0.1.0.jar --scenario chaos --seed 42
 java -jar target/jraft-sim-0.1.0.jar -s crash -n 3 -d 4000 --verbose   # include every client op
+java -jar target/jraft-sim-0.1.0.jar -s figure8 --unsafe-commit        # watch the checkers catch a real Raft bug
 ```
 
 | Scenario    | What it does |
@@ -75,6 +76,7 @@ java -jar target/jraft-sim-0.1.0.jar -s crash -n 3 -d 4000 --verbose   # include
 | `partition` | isolate the leader in a minority while clients write, then heal |
 | `crash`     | crash and restart followers and the leader under load; state comes back from disk |
 | `snapshot`  | keep a follower down while the log is compacted; it catches up via InstallSnapshot |
+| `figure8`   | scripted replay of Figure 8 from the Raft paper (always 5 nodes); add `--unsafe-commit` to see the bug get caught |
 | `chaos`     | random crashes, restarts, partitions and leader isolation on a lossy network |
 
 The CLI exits 0 when every check passes and 1 when one fails, so it can be scripted over seeds.
@@ -110,9 +112,42 @@ checkers. Mutation testing against the chaos suite shows what they catch:
 - Dropping the up-to-date check from vote granting fails 129 of 210 chaos runs (leader
   completeness, then committed entries being overwritten).
 - Letting leaders commit previous-term entries by counting replicas (the Figure 8 bug) is **not**
-  caught, even across 15,000 seeds. Raft only goes wrong there under a very specific sequence of
-  crashes and elections, and the leader no-op makes that sequence rarer still. A targeted
-  scenario test for Figure 8 would be a good next step.
+  caught by random chaos, even across 15,000 seeds. Raft only goes wrong there under a very
+  specific sequence of crashes and elections, and the leader no-op makes that sequence rarer
+  still. So it gets its own scripted test instead (next section).
+
+### Figure 8, replayed
+
+`Figure8` drives five nodes through the exact sequence from Figure 8 of the Raft paper. It uses
+`RaftNode.campaign()` to pick who stands for election, very long election timeouts so nobody else
+does, one entry per AppendEntries and a lossless network:
+
+1. n0 leads term 1 and gets a write (index 2) onto n1 only.
+2. n0 crashes. n4 wins term 2 with n2 and n3, appends its own index 2 and crashes.
+3. n0 comes back, wins term 3 and copies its term-1 index 2 to n2. That entry is now on a
+   majority, and the script stops n0 the moment it advances its commit index.
+4. n4 comes back. Its last log term (2) beats the term-1 entry, so n2 and n3 vote for it.
+
+With the real rule, n0 can only commit once its term-3 no-op is on a majority too, and by then
+n4 cannot collect the votes. The term-1 write survives. With the bug switched on
+(`RaftConfig.withUnsafeCommitRule(true)`, or `--unsafe-commit` on the CLI), n0 commits index 2 in
+step 3 and n4 overwrites it in step 4. The checker reports leader completeness and state machine
+safety violations:
+
+```
+$ java -jar target/jraft-sim-0.1.0.jar -s figure8 --unsafe-commit
+...
+    602ms  n4    became LEADER for term 4 (log last index 2)
+    902ms  sim   old entry was on a majority: yes; n0 had committed through index 2 (a term-1 entry); n4 elected with a divergent log: YES
+...
+invariants: VIOLATED (227 checks, 4 leaders, 3 committed entries)
+  ! t=602ms leader completeness: n4 leads term 4 without LogEntry[term=1, index=2, command=Put[...]] committed in term 3
+  ! t=606ms committed entry changed at index 2: LogEntry[term=1, index=2, ...] vs LogEntry[term=2, index=2, command=Noop[]] on leader n4
+  ! t=606ms state machine safety: index 2 applied as both LogEntry[term=1, index=2, ...] and LogEntry[term=2, index=2, command=Noop[]]
+```
+
+`Figure8Test` runs both versions over several seeds. The safe one must finish with no
+violations and the write intact, and the broken one must be caught.
 
 ## Design notes
 

@@ -204,6 +204,20 @@ public final class RaftNode {
 
     // ---------------------------------------------------------------- roles
 
+    /**
+     * Starts an election right now instead of waiting for the election timer, as if it had just
+     * fired. Used by scripted scenarios (and by operators) to pick who campaigns next; the vote
+     * itself still follows the normal rules, so this cannot elect a node with a stale log.
+     */
+    public void campaign() {
+        if (!up) {
+            throw new IllegalStateException("node " + id + " is down");
+        }
+        if (role != Role.LEADER) {
+            startElection();
+        }
+    }
+
     private void setRole(Role next) {
         Role previous = role;
         role = next;
@@ -426,7 +440,7 @@ public final class RaftNode {
         RaftLog log = disk.log();
         long term = disk.currentTerm();
         for (long n = log.lastIndex(); n > commitIndex; n--) {
-            if (log.termAt(n) != term) {
+            if (log.termAt(n) != term && !config.unsafeCommitRule()) {
                 break; // never commit an older term's entry by counting (Raft paper, section 5.4.2)
             }
             int replicas = 1;

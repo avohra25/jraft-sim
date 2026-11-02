@@ -44,6 +44,20 @@ class MainTest {
     }
 
     @Test
+    void figure8ScenarioAndTheUnsafeCommitFlag() {
+        Run safe = main("-s", "figure8", "-n", "3");
+        assertEquals(0, safe.code(), safe.out());
+        assertTrue(safe.out().contains("5 nodes"), safe.out());
+        assertTrue(safe.out().contains("n4 elected with a divergent log: no"), safe.out());
+
+        Run broken = main("-s", "figure8", "--unsafe-commit");
+        assertEquals(1, broken.code(), broken.out());
+        assertTrue(broken.out().contains("WARNING"), broken.out());
+        assertTrue(broken.out().contains("invariants: VIOLATED"), broken.out());
+        assertTrue(broken.out().contains("leader completeness"), broken.out());
+    }
+
+    @Test
     void verboseListsClientOperations() {
         Run run = main("-s", "crash", "-v", "-d", "2000");
         assertTrue(run.out().contains("c100"), run.out());
