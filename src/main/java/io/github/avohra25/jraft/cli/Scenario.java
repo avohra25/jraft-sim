@@ -84,6 +84,31 @@ public enum Scenario {
         }
     },
 
+    TRANSFER("hand leadership around the cluster under load, including one transfer to a dead node") {
+        @Override
+        void drive(Cluster cluster, Options options) {
+            cluster.startWorkload(options.duration());
+            int n = cluster.nodes().size();
+            long step = Math.max(300, options.duration() / (2L * n + 2));
+            for (int round = 0; round < n - 1 && cluster.sim().now() + 2 * step < options.duration(); round++) {
+                cluster.runFor(step);
+                RaftNode leader = cluster.awaitLeader(5_000);
+                cluster.transferLeadership(leader.id(), (leader.id() + 1) % n);
+            }
+            if (n > 1 && cluster.sim().now() + 3 * step < options.duration()) {
+                // A transfer whose target is down must time out and leave the leader in charge.
+                cluster.runFor(step);
+                RaftNode leader = cluster.awaitLeader(5_000);
+                int dead = (leader.id() + 1) % n;
+                cluster.crash(dead);
+                cluster.transferLeadership(leader.id(), dead);
+                cluster.runFor(step);
+                cluster.restart(dead);
+            }
+            cluster.runUntil(options.duration());
+        }
+    },
+
     FIGURE8("replay Figure 8 of the Raft paper: an old-term entry on a majority that must not count as committed") {
         @Override
         RaftConfig raftConfig() {

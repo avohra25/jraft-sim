@@ -242,6 +242,11 @@ public final class Cluster implements RaftListener {
      * Hands {@code command} straight to node {@code id}, as a client request from a scripted
      * client that never retries. Used by scenarios that need exact control over the log.
      */
+    /** Asks the current leader {@code from} to hand leadership to {@code to}. */
+    public void transferLeadership(int from, int to) {
+        nodes.get(from).transferLeadership(to);
+    }
+
     public void propose(int id, Command.ClientCommand command) {
         timeline.add(sim.now(), "script", command + " -> n" + id);
         network.send(SCRIPT_CLIENT, id, new Message.ClientRequest(command));
@@ -344,6 +349,11 @@ public final class Cluster implements RaftListener {
     @Override
     public void onPreVote(RaftNode node, long term) {
         timeline.add(sim.now(), "n" + node.id(), "election timeout -> asking for pre-votes for term " + term);
+    }
+
+    @Override
+    public void onTransfer(RaftNode leader, int target, String what) {
+        timeline.add(sim.now(), "n" + leader.id(), what);
     }
 
     @Override

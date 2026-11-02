@@ -10,7 +10,7 @@ randomized run is checked two ways: **online invariant checks** of Raft's safety
 a **linearizability check** of what the clients actually saw.
 
 ```
-$ java -jar target/jraft-sim-0.1.0.jar --scenario partition --seed 4 --duration 3000
+$ java -jar target/jraft-sim-0.2.0.jar --scenario partition --seed 4 --duration 3000
       0ms  sim   cluster of 5 nodes started (seed 4)
     168ms  n3    election timeout -> CANDIDATE for term 1
     182ms  n3    became LEADER for term 1 (log last index 0)
@@ -46,6 +46,9 @@ down, and the term-2 leader overwrites those entries.
   the cluster before raising its term, so one that was cut off cannot depose a healthy leader
   when it comes back. With check-quorum, a leader that stops hearing from a majority steps down,
   and nodes that heard from a leader recently refuse to vote someone else in (a leader lease).
+- **Leadership transfer** (Raft thesis §3.10). `RaftNode.transferLeadership(target)` pauses new
+  writes, brings the target's log up to date, and sends it `TimeoutNow` so it wins an election
+  straight away. A transfer the target never completes is abandoned after one election timeout.
 - **Crash/restart with persistent state.** Term, vote, log and snapshot live in a
   `PersistentState` "disk" that outlives a crash. Everything else is rebuilt on restart.
 - **Log compaction**: nodes snapshot the state machine every N applied entries. Leaders send
@@ -64,15 +67,15 @@ down, and the term-2 leader overwrites those entries.
 Requires JDK 21 and Maven 3.9+.
 
 ```sh
-mvn test                          # 2114 tests: unit tests + 2000 randomized fault-injection runs
+mvn test                          # 2128 tests: unit tests + 2000 randomized fault-injection runs
 mvn test -Dtest=ChaosTest -Dchaos.seeds=20000   # a much bigger sweep (40k runs)
 
 mvn package -DskipTests
-java -jar target/jraft-sim-0.1.0.jar --list
-java -jar target/jraft-sim-0.1.0.jar --scenario chaos --seed 42
-java -jar target/jraft-sim-0.1.0.jar -s crash -n 3 -d 4000 --verbose   # include every client op
-java -jar target/jraft-sim-0.1.0.jar -s figure8 --unsafe-commit        # watch the checkers catch a real Raft bug
-java -jar target/jraft-sim-0.1.0.jar -s partition --prevote --check-quorum
+java -jar target/jraft-sim-0.2.0.jar --list
+java -jar target/jraft-sim-0.2.0.jar --scenario chaos --seed 42
+java -jar target/jraft-sim-0.2.0.jar -s crash -n 3 -d 4000 --verbose   # include every client op
+java -jar target/jraft-sim-0.2.0.jar -s figure8 --unsafe-commit        # watch the checkers catch a real Raft bug
+java -jar target/jraft-sim-0.2.0.jar -s partition --prevote --check-quorum
 ```
 
 | Scenario    | What it does |
@@ -81,6 +84,7 @@ java -jar target/jraft-sim-0.1.0.jar -s partition --prevote --check-quorum
 | `partition` | isolate the leader in a minority while clients write, then heal |
 | `crash`     | crash and restart followers and the leader under load; state comes back from disk |
 | `snapshot`  | keep a follower down while the log is compacted; it catches up via InstallSnapshot |
+| `transfer`  | pass leadership round the cluster under load, then try a transfer to a crashed node, which times out |
 | `figure8`   | scripted replay of Figure 8 from the Raft paper (always 5 nodes); add `--unsafe-commit` to see the bug get caught |
 | `chaos`     | random crashes, restarts, partitions and leader isolation on a lossy network |
 
@@ -95,6 +99,19 @@ side keep asking for pre-votes instead of inflating their term:
     784ms  n2    became LEADER for term 2 (log last index 25)
     802ms  n3    heard from only 2 of 5 nodes -> giving up leadership (check-quorum)
    1039ms  n3    election timeout -> asking for pre-votes for term 2
+```
+
+`transfer` shows each handoff costing one term and a few milliseconds instead of an election
+timeout:
+
+```
+    500ms  n4    transferring leadership to n0
+    504ms  n4    n0 is caught up, sending TimeoutNow
+    522ms  n4    LEADER -> FOLLOWER, term 2
+    528ms  n0    became LEADER for term 2 (log last index 15)
+   ...
+   2500ms  n3    transferring leadership to n4
+   2650ms  n3    transfer to n4 timed out, still leading
 ```
 
 The CLI exits 0 when every check passes and 1 when one fails, so it can be scripted over seeds.
@@ -153,7 +170,7 @@ step 3 and n4 overwrites it in step 4. The checker reports leader completeness a
 safety violations:
 
 ```
-$ java -jar target/jraft-sim-0.1.0.jar -s figure8 --unsafe-commit
+$ java -jar target/jraft-sim-0.2.0.jar -s figure8 --unsafe-commit
 ...
     602ms  n4    became LEADER for term 4 (log last index 2)
     902ms  sim   old entry was on a majority: yes; n0 had committed through index 2 (a term-1 entry); n4 elected with a divergent log: YES
@@ -209,6 +226,15 @@ heard from a leader within `electionTimeoutMin`. With check-quorum on, that same
 nodes ignore *real* vote requests from newer terms, which is safe only because a leader that
 loses its majority now steps down on its own within one `electionTimeoutMin` window. The chaos
 sweep runs a third batch with both options on.
+
+**Leadership transfer.** While a transfer is pending the leader answers client writes with
+`ok=false` and no leader hint, so the target's log can actually catch up. It sends `TimeoutNow`
+once the target's `matchIndex` reaches its last index, either right away or on the
+AppendEntries reply that gets it there. The target then campaigns at once, skipping pre-vote,
+and marks its `RequestVote` as a transfer so the leader lease does not make voters refuse it. If
+the target is down, the leader's transfer timer fires after `electionTimeoutMin`, the transfer is
+dropped, and writes resume. Nothing about safety changes: the target still needs a majority of
+votes under the usual up-to-date-log rule.
 
 **Client protocol.** A client has one operation outstanding and retries it under the same
 `(clientId, seq)`, following leader hints and rotating nodes on timeout. Retries may land in the

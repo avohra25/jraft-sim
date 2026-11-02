@@ -16,6 +16,7 @@ import io.github.avohra25.jraft.raft.Message.InstallSnapshot;
 import io.github.avohra25.jraft.raft.Message.InstallSnapshotReply;
 import io.github.avohra25.jraft.raft.Message.RequestVote;
 import io.github.avohra25.jraft.raft.Message.RequestVoteReply;
+import io.github.avohra25.jraft.raft.Message.TimeoutNow;
 import io.github.avohra25.jraft.sim.Network;
 import io.github.avohra25.jraft.sim.Simulator;
 
@@ -60,6 +61,10 @@ public final class RaftNode {
     private long lastLeaderContact = Long.MIN_VALUE / 2;
     private final Set<Integer> recentlyActive = new HashSet<>();
     private Simulator.Timer checkQuorumTimer;
+    // Leadership transfer in progress (leader only): the target, or -1.
+    private int transferTarget = -1;
+    private boolean timeoutNowSent;
+    private Simulator.Timer transferTimer;
 
     public RaftNode(int id, List<Integer> peers, Simulator sim, Network<Message> network, RaftConfig config,
                     PersistentState disk, Supplier<? extends StateMachine> stateMachineFactory,
@@ -100,6 +105,7 @@ public final class RaftNode {
         preVotes.clear();
         recentlyActive.clear();
         lastLeaderContact = Long.MIN_VALUE / 2;
+        transferTarget = -1;
         stateMachine = stateMachineFactory.get();
         RaftLog log = disk.log();
         if (disk.snapshot() != null) {
@@ -120,6 +126,8 @@ public final class RaftNode {
         cancel(electionTimer);
         cancel(heartbeatTimer);
         cancel(checkQuorumTimer);
+        cancel(transferTimer);
+        transferTarget = -1;
         Role previous = role;
         role = Role.FOLLOWER;
         leaderId = -1;
@@ -153,6 +161,11 @@ public final class RaftNode {
 
     public int leaderId() {
         return leaderId;
+    }
+
+    /** The node this leader is handing over to, or -1 when no transfer is in progress. */
+    public int transferTarget() {
+        return transferTarget;
     }
 
     public long commitIndex() {
@@ -256,7 +269,7 @@ public final class RaftNode {
             return;
         }
         RaftLog log = disk.log();
-        RequestVote request = new RequestVote(term, id, log.lastIndex(), log.lastTerm(), true);
+        RequestVote request = new RequestVote(term, id, log.lastIndex(), log.lastTerm(), true, false);
         for (int peer : peers) {
             send(peer, request);
         }
@@ -283,7 +296,61 @@ public final class RaftNode {
         }
     }
 
+    /**
+     * Hands leadership to {@code target} (Raft thesis, section 3.10). The leader stops taking new
+     * client writes, brings the target's log fully up to date, then sends it {@link TimeoutNow} so it
+     * campaigns at once, skipping pre-vote and the leader lease. If the target has not taken over
+     * within {@code electionTimeoutMin} the transfer is abandoned and this node carries on leading.
+     * Transferring to ourselves is a no-op; a second request replaces the first.
+     */
+    public void transferLeadership(int target) {
+        if (!up || role != Role.LEADER) {
+            throw new IllegalStateException("node " + id + " is not the leader");
+        }
+        if (target == id) {
+            return;
+        }
+        if (!peers.contains(target)) {
+            throw new IllegalArgumentException("node " + target + " is not in the cluster");
+        }
+        cancel(transferTimer);
+        transferTarget = target;
+        timeoutNowSent = false;
+        listener.onTransfer(this, target, "transferring leadership to n" + target);
+        long term = disk.currentTerm();
+        transferTimer = after(config.electionTimeoutMin(), () -> {
+            if (role == Role.LEADER && transferTarget == target && disk.currentTerm() == term) {
+                transferTarget = -1;
+                listener.onTransfer(this, target, "transfer to n" + target + " timed out, still leading");
+            }
+        });
+        maybeSendTimeoutNow();
+        if (!timeoutNowSent) {
+            sendAppendEntries(target); // catch it up first
+        }
+    }
+
+    private void maybeSendTimeoutNow() {
+        if (transferTarget < 0 || timeoutNowSent || matchIndex.get(transferTarget) < disk.log().lastIndex()) {
+            return;
+        }
+        timeoutNowSent = true;
+        listener.onTransfer(this, transferTarget, "n" + transferTarget + " is caught up, sending TimeoutNow");
+        send(transferTarget, new TimeoutNow(disk.currentTerm(), id));
+    }
+
+    private void onTimeoutNow(int from, TimeoutNow m) {
+        if (m.term() != disk.currentTerm() || role == Role.LEADER) {
+            return; // stale, or from a leader we have already moved past
+        }
+        startElection(true);
+    }
+
     private void startElection() {
+        startElection(false);
+    }
+
+    private void startElection(boolean transfer) {
         preVoteTerm = 0;
         disk.advanceTerm(disk.currentTerm() + 1);
         disk.voteFor(id);
@@ -297,7 +364,7 @@ public final class RaftNode {
             return;
         }
         RaftLog log = disk.log();
-        RequestVote request = new RequestVote(disk.currentTerm(), id, log.lastIndex(), log.lastTerm());
+        RequestVote request = new RequestVote(disk.currentTerm(), id, log.lastIndex(), log.lastTerm(), false, transfer);
         for (int peer : peers) {
             send(peer, request);
         }
@@ -355,6 +422,8 @@ public final class RaftNode {
             boolean wasLeader = role == Role.LEADER;
             cancel(heartbeatTimer);
             cancel(checkQuorumTimer);
+            cancel(transferTimer);
+            transferTarget = -1;
             setRole(Role.FOLLOWER);
             if (wasLeader) {
                 resetElectionTimer();
@@ -379,6 +448,7 @@ public final class RaftNode {
             case AppendEntriesReply m -> onAppendEntriesReply(from, m);
             case InstallSnapshot m -> onInstallSnapshot(from, m);
             case InstallSnapshotReply m -> onInstallSnapshotReply(from, m);
+            case TimeoutNow m -> onTimeoutNow(from, m);
             case ClientRequest m -> onClientRequest(from, m);
             case ClientReply m -> { } // servers never receive these
         }
@@ -393,7 +463,7 @@ public final class RaftNode {
      */
     private boolean adoptsTermOf(Message.RaftRpc rpc) {
         return switch (rpc) {
-            case RequestVote m -> !m.preVote() && !(config.checkQuorum() && inLeaderLease());
+            case RequestVote m -> !m.preVote() && (m.transfer() || !(config.checkQuorum() && inLeaderLease()));
             case RequestVoteReply m -> !(m.preVote() && m.granted());
             default -> true;
         };
@@ -551,6 +621,9 @@ public final class RaftNode {
             matchIndex.put(from, match);
             nextIndex.put(from, Math.max(nextIndex.get(from), match + 1));
             advanceCommitIndex();
+            if (from == transferTarget) {
+                maybeSendTimeoutNow();
+            }
             if (nextIndex.get(from) <= log.lastIndex()) {
                 sendAppendEntries(from);
             }
@@ -657,6 +730,9 @@ public final class RaftNode {
         matchIndex.put(from, match);
         nextIndex.put(from, Math.max(nextIndex.get(from), match + 1));
         advanceCommitIndex();
+        if (from == transferTarget) {
+            maybeSendTimeoutNow();
+        }
         if (nextIndex.get(from) <= disk.log().lastIndex()) {
             sendAppendEntries(from);
         }
@@ -668,6 +744,11 @@ public final class RaftNode {
         Command.ClientCommand cmd = m.command();
         if (role != Role.LEADER) {
             send(from, new ClientReply(cmd.clientId(), cmd.seq(), false, null, leaderId));
+            return;
+        }
+        if (transferTarget >= 0) {
+            // Mid-transfer: new entries would only keep the target from ever catching up.
+            send(from, new ClientReply(cmd.clientId(), cmd.seq(), false, null, -1));
             return;
         }
         // Duplicates (client retries) are appended too; the state machine's sessions make

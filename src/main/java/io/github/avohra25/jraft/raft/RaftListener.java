@@ -8,6 +8,9 @@ public interface RaftListener {
     /** A node's election timer fired and it is asking for pre-votes for {@code term}. */
     default void onPreVote(RaftNode node, long term) {}
 
+    /** Progress of a leadership transfer on the leader: {@code what} is a short description. */
+    default void onTransfer(RaftNode leader, int target, String what) {}
+
     /** A leader that has not heard from a majority within one election timeout is giving up. */
     default void onLostQuorum(RaftNode leader, int reachable) {}
 

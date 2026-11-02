@@ -15,12 +15,13 @@ public sealed interface Message {
     /**
      * With {@code preVote} set this only asks "would you vote for me in {@code term}?": the
      * receiver changes no state, and {@code term} is the term the sender would campaign in, not
-     * one it has adopted.
+     * one it has adopted. {@code transfer} marks an election the old leader asked for (via
+     * {@link TimeoutNow}), which voters must not refuse just because they heard from that leader.
      */
-    record RequestVote(long term, int candidateId, long lastLogIndex, long lastLogTerm, boolean preVote)
-            implements RaftRpc {
+    record RequestVote(long term, int candidateId, long lastLogIndex, long lastLogTerm, boolean preVote,
+                       boolean transfer) implements RaftRpc {
         public RequestVote(long term, int candidateId, long lastLogIndex, long lastLogTerm) {
-            this(term, candidateId, lastLogIndex, lastLogTerm, false);
+            this(term, candidateId, lastLogIndex, lastLogTerm, false, false);
         }
     }
 
@@ -51,6 +52,9 @@ public sealed interface Message {
                            byte[] data) implements RaftRpc {}
 
     record InstallSnapshotReply(long term, long matchIndex) implements RaftRpc {}
+
+    /** Leadership transfer: "your log matches mine, start an election right now". */
+    record TimeoutNow(long term, int leaderId) implements RaftRpc {}
 
     record ClientRequest(Command.ClientCommand command) implements Message {}
 
