@@ -19,7 +19,8 @@ import io.github.avohra25.jraft.sim.Network;
  * faults stop. A failure message names the seed, which replays the run exactly.
  *
  * <p>Runs take a few milliseconds each. Scale the sweep with {@code -Dchaos.seeds=N} (default
- * 1000 five-node seeds plus half as many three-node seeds); rare schedules such as the paper's
+ * 1000 five-node seeds plus half as many three-node seeds, and half as many again
+ * five-node seeds with pre-vote and check-quorum on); rare schedules such as the paper's
  * Figure 8 only show up with enough seeds.
  */
 class ChaosTest {
@@ -34,24 +35,37 @@ class ChaosTest {
         return LongStream.rangeClosed(1_000_001, 1_000_000 + SEEDS / 2);
     }
 
+    static LongStream hardenedSeeds() {
+        return LongStream.rangeClosed(2_000_001, 2_000_000 + SEEDS / 2);
+    }
+
+    private static final RaftConfig PLAIN = RaftConfig.defaults().withSnapshotThreshold(30);
+
     @ParameterizedTest(name = "5 nodes, seed {0}")
     @MethodSource("fiveNodeSeeds")
     void fiveNodes(long seed) {
-        run(seed, 5);
+        run(seed, 5, PLAIN);
     }
 
     @ParameterizedTest(name = "3 nodes, seed {0}")
     @MethodSource("threeNodeSeeds")
     void threeNodes(long seed) {
-        run(seed, 3);
+        run(seed, 3, PLAIN);
     }
 
-    static void run(long seed, int nodes) {
+    /** The same faults with pre-vote and check-quorum on: the extra rules must not cost safety or liveness. */
+    @ParameterizedTest(name = "5 nodes, pre-vote + check-quorum, seed {0}")
+    @MethodSource("hardenedSeeds")
+    void fiveNodesWithPreVoteAndCheckQuorum(long seed) {
+        run(seed, 5, PLAIN.withPreVote(true).withCheckQuorum(true));
+    }
+
+    static void run(long seed, int nodes, RaftConfig raft) {
         Cluster cluster = Cluster.builder()
                 .nodes(nodes)
                 .seed(seed)
                 .network(Network.Config.lossy())
-                .raft(RaftConfig.defaults().withSnapshotThreshold(30))
+                .raft(raft)
                 .clients(3)
                 .keys(3)
                 .build();

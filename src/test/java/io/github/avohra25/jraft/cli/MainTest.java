@@ -1,6 +1,7 @@
 package io.github.avohra25.jraft.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -55,6 +56,18 @@ class MainTest {
         assertTrue(broken.out().contains("WARNING"), broken.out());
         assertTrue(broken.out().contains("invariants: VIOLATED"), broken.out());
         assertTrue(broken.out().contains("leader completeness"), broken.out());
+    }
+
+    @Test
+    void preVoteAndCheckQuorumFlags() {
+        Run run = main("-s", "partition", "--seed", "4", "--prevote", "--check-quorum");
+        assertEquals(0, run.code(), run.out());
+        assertTrue(run.out().contains("enabled: pre-vote, check-quorum"), run.out());
+        assertTrue(run.out().contains("asking for pre-votes"), run.out());
+        assertTrue(run.out().contains("invariants: OK"), run.out());
+
+        Run plain = main("-s", "partition", "--seed", "4");
+        assertFalse(plain.out().contains("pre-vote"), plain.out());
     }
 
     @Test

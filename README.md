@@ -42,6 +42,10 @@ down, and the term-2 leader overwrites those entries.
   the fast-backtracking optimization (followers return `conflictTerm`/`conflictIndex`, so the
   leader skips a whole term per round trip). Commit index advances by majority match, and only
   for entries from the current term (§5.4.2).
+- **Pre-vote and check-quorum** (Raft thesis §9.6, both opt-in). With pre-vote, a node polls
+  the cluster before raising its term, so one that was cut off cannot depose a healthy leader
+  when it comes back. With check-quorum, a leader that stops hearing from a majority steps down,
+  and nodes that heard from a leader recently refuse to vote someone else in (a leader lease).
 - **Crash/restart with persistent state.** Term, vote, log and snapshot live in a
   `PersistentState` "disk" that outlives a crash. Everything else is rebuilt on restart.
 - **Log compaction**: nodes snapshot the state machine every N applied entries. Leaders send
@@ -60,14 +64,15 @@ down, and the term-2 leader overwrites those entries.
 Requires JDK 21 and Maven 3.9+.
 
 ```sh
-mvn test                          # 1583 tests: unit tests + 1500 randomized fault-injection runs
-mvn test -Dtest=ChaosTest -Dchaos.seeds=20000   # a much bigger sweep (about 30k runs, ~30s)
+mvn test                          # 2114 tests: unit tests + 2000 randomized fault-injection runs
+mvn test -Dtest=ChaosTest -Dchaos.seeds=20000   # a much bigger sweep (40k runs)
 
 mvn package -DskipTests
 java -jar target/jraft-sim-0.1.0.jar --list
 java -jar target/jraft-sim-0.1.0.jar --scenario chaos --seed 42
 java -jar target/jraft-sim-0.1.0.jar -s crash -n 3 -d 4000 --verbose   # include every client op
 java -jar target/jraft-sim-0.1.0.jar -s figure8 --unsafe-commit        # watch the checkers catch a real Raft bug
+java -jar target/jraft-sim-0.1.0.jar -s partition --prevote --check-quorum
 ```
 
 | Scenario    | What it does |
@@ -78,6 +83,19 @@ java -jar target/jraft-sim-0.1.0.jar -s figure8 --unsafe-commit        # watch t
 | `snapshot`  | keep a follower down while the log is compacted; it catches up via InstallSnapshot |
 | `figure8`   | scripted replay of Figure 8 from the Raft paper (always 5 nodes); add `--unsafe-commit` to see the bug get caught |
 | `chaos`     | random crashes, restarts, partitions and leader isolation on a lossy network |
+
+`--prevote` and `--check-quorum` work with every scenario. In `partition` they change the story:
+the stranded leader notices it can reach only 2 of 5 nodes and steps down, and the nodes on its
+side keep asking for pre-votes instead of inflating their term:
+
+```
+    605ms  net   PARTITION {n3,n0} | {n1,n2,n4}
+    734ms  n4    election timeout -> asking for pre-votes for term 2
+    768ms  n2    election timeout -> CANDIDATE for term 2
+    784ms  n2    became LEADER for term 2 (log last index 25)
+    802ms  n3    heard from only 2 of 5 nodes -> giving up leadership (check-quorum)
+   1039ms  n3    election timeout -> asking for pre-votes for term 2
+```
 
 The CLI exits 0 when every check passes and 1 when one fails, so it can be scripted over seeds.
 
@@ -184,6 +202,14 @@ snapshot first and then truncates the prefix. A follower that installs a snapsho
 suffix if the entry at `lastIncludedIndex` matches, and otherwise discards the whole log.
 AppendEntries that overlap a follower's snapshot are trimmed to the part beyond it.
 
+**Pre-vote and the lease.** A pre-vote is a `RequestVote` with `preVote` set for the term the
+sender *would* move to. Receivers answer it without touching their own state, and it never makes
+anyone adopt that term. They say yes only if the sender's log is up to date and they have not
+heard from a leader within `electionTimeoutMin`. With check-quorum on, that same lease also makes
+nodes ignore *real* vote requests from newer terms, which is safe only because a leader that
+loses its majority now steps down on its own within one `electionTimeoutMin` window. The chaos
+sweep runs a third batch with both options on.
+
 **Client protocol.** A client has one operation outstanding and retries it under the same
 `(clientId, seq)`, following leader hints and rotating nodes on timeout. Retries may land in the
 log more than once. The KV session table makes the second application a no-op that returns the
@@ -196,14 +222,14 @@ sim/      Simulator (event loop, timers, seeded RNG), Network (delay/drop/dup/pa
 raft/     RaftNode, RaftLog, PersistentState, Message (sealed RPC hierarchy), RaftConfig
 kv/       Command (sealed), KvStore (state machine + client sessions + snapshot codec)
 check/    InvariantChecker, History, LinearizabilityChecker
-harness/  Cluster (wires everything up), KvClient, Nemesis (fault injector), Timeline
+harness/  Cluster (wires everything up), KvClient, Nemesis (fault injector), Timeline, Figure8
 cli/      Main, Scenario
 ```
 
 ## Limitations
 
 - Membership is static: no joint consensus or single-server membership changes.
-- No PreVote or leader leases, and reads go through the log rather than ReadIndex.
+- Reads go through the log rather than ReadIndex, even though check-quorum leaders hold a lease.
 - A snapshot is sent as one message, not in chunks.
 - Storage is modelled, not real: there are no torn writes or lost fsyncs.
 

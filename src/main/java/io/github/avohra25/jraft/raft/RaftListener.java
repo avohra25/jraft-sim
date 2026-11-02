@@ -5,6 +5,12 @@ public interface RaftListener {
 
     default void onRoleChange(RaftNode node, RaftNode.Role previous) {}
 
+    /** A node's election timer fired and it is asking for pre-votes for {@code term}. */
+    default void onPreVote(RaftNode node, long term) {}
+
+    /** A leader that has not heard from a majority within one election timeout is giving up. */
+    default void onLostQuorum(RaftNode leader, int reachable) {}
+
     /** Called on the leader each time it advances its commit index by counting replicas. */
     default void onLeaderCommit(RaftNode leader, long commitIndex) {}
 

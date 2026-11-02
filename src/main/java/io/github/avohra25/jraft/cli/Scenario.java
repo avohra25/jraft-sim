@@ -130,8 +130,17 @@ public enum Scenario {
         }
     };
 
-    /** {@code unsafeCommit} turns on the Figure 8 commit bug, to watch the checkers catch it. */
-    record Options(long seed, int nodes, long duration, boolean verbose, boolean unsafeCommit) {}
+    /**
+     * {@code unsafeCommit} turns on the Figure 8 commit bug, to watch the checkers catch it;
+     * {@code preVote} and {@code checkQuorum} switch on those election refinements.
+     */
+    record Options(long seed, int nodes, long duration, boolean verbose, boolean unsafeCommit,
+                   boolean preVote, boolean checkQuorum) {
+
+        Options(long seed, int nodes, long duration, boolean verbose) {
+            this(seed, nodes, duration, verbose, false, false, false);
+        }
+    }
 
     private final String description;
 
@@ -172,7 +181,8 @@ public enum Scenario {
                 .nodes(nodes(options.nodes()))
                 .seed(options.seed())
                 .network(networkConfig())
-                .raft(raftConfig().withUnsafeCommitRule(options.unsafeCommit()))
+                .raft(raftConfig().withUnsafeCommitRule(options.unsafeCommit())
+                        .withPreVote(options.preVote()).withCheckQuorum(options.checkQuorum()))
                 .clients(clients())
                 .traceClients(options.verbose())
                 .build();

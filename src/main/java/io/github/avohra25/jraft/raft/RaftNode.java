@@ -53,6 +53,13 @@ public final class RaftNode {
     private final Set<Integer> votes = new HashSet<>();
     private Simulator.Timer electionTimer;
     private Simulator.Timer heartbeatTimer;
+    // Pre-vote: the term we are polling for (0 = not polling) and who said yes.
+    private long preVoteTerm;
+    private final Set<Integer> preVotes = new HashSet<>();
+    // Check-quorum: when we last heard from a leader, and (as leader) which peers answered lately.
+    private long lastLeaderContact = Long.MIN_VALUE / 2;
+    private final Set<Integer> recentlyActive = new HashSet<>();
+    private Simulator.Timer checkQuorumTimer;
 
     public RaftNode(int id, List<Integer> peers, Simulator sim, Network<Message> network, RaftConfig config,
                     PersistentState disk, Supplier<? extends StateMachine> stateMachineFactory,
@@ -89,6 +96,10 @@ public final class RaftNode {
         votes.clear();
         nextIndex.clear();
         matchIndex.clear();
+        preVoteTerm = 0;
+        preVotes.clear();
+        recentlyActive.clear();
+        lastLeaderContact = Long.MIN_VALUE / 2;
         stateMachine = stateMachineFactory.get();
         RaftLog log = disk.log();
         if (disk.snapshot() != null) {
@@ -108,6 +119,7 @@ public final class RaftNode {
         up = false;
         cancel(electionTimer);
         cancel(heartbeatTimer);
+        cancel(checkQuorumTimer);
         Role previous = role;
         role = Role.FOLLOWER;
         leaderId = -1;
@@ -189,7 +201,7 @@ public final class RaftNode {
     private void resetElectionTimer() {
         cancel(electionTimer);
         long timeout = sim.uniform(config.electionTimeoutMin(), config.electionTimeoutMax());
-        electionTimer = after(timeout, this::startElection);
+        electionTimer = after(timeout, this::onElectionTimeout);
     }
 
     private void scheduleHeartbeat() {
@@ -205,17 +217,62 @@ public final class RaftNode {
     // ---------------------------------------------------------------- roles
 
     /**
-     * Starts an election right now instead of waiting for the election timer, as if it had just
-     * fired. Used by scripted scenarios (and by operators) to pick who campaigns next; the vote
-     * itself still follows the normal rules, so this cannot elect a node with a stale log.
+     * Acts as if the election timer had just fired: starts an election right now (or, with
+     * pre-vote on, the pre-vote round). Used by scripted scenarios (and by operators) to pick who
+     * campaigns next; the vote itself still follows the normal rules, so this cannot elect a node
+     * with a stale log.
      */
     public void campaign() {
         if (!up) {
             throw new IllegalStateException("node " + id + " is down");
         }
         if (role != Role.LEADER) {
+            onElectionTimeout();
+        }
+    }
+
+    private void onElectionTimeout() {
+        if (config.preVote()) {
+            startPreVote();
+        } else {
             startElection();
         }
+    }
+
+    /**
+     * Asks the cluster whether it would vote for us in the next term before actually moving to
+     * it. A node that cannot win (cut off, or with a stale log) keeps failing here without ever
+     * raising its term, so when it reconnects it does not force the healthy leader to step down.
+     */
+    private void startPreVote() {
+        long term = disk.currentTerm() + 1;
+        preVoteTerm = term;
+        preVotes.clear();
+        preVotes.add(id);
+        listener.onPreVote(this, term);
+        resetElectionTimer();
+        if (preVotes.size() >= majority()) {
+            startElection();
+            return;
+        }
+        RaftLog log = disk.log();
+        RequestVote request = new RequestVote(term, id, log.lastIndex(), log.lastTerm(), true);
+        for (int peer : peers) {
+            send(peer, request);
+        }
+    }
+
+    /**
+     * True while we believe a leader is alive: we are it, or one contacted us within the minimum
+     * election timeout. Pre-votes are always refused inside the lease (that costs nothing, no state
+     * changes). Real votes in a newer term are only refused with check-quorum on, because only
+     * then does a cut-off leader reliably give up, which is what makes ignoring challengers safe.
+     */
+    private boolean inLeaderLease() {
+        if (role == Role.LEADER) {
+            return true;
+        }
+        return leaderId != -1 && sim.now() - lastLeaderContact < config.electionTimeoutMin();
     }
 
     private void setRole(Role next) {
@@ -227,6 +284,7 @@ public final class RaftNode {
     }
 
     private void startElection() {
+        preVoteTerm = 0;
         disk.advanceTerm(disk.currentTerm() + 1);
         disk.voteFor(id);
         leaderId = -1;
@@ -254,6 +312,10 @@ public final class RaftNode {
             matchIndex.put(peer, 0L);
         }
         setRole(Role.LEADER);
+        if (config.checkQuorum()) {
+            recentlyActive.clear();
+            scheduleCheckQuorum();
+        }
         // A no-op from the new term lets the leader commit (and so learn the fate of) entries
         // left behind by earlier leaders, which it may not commit by counting replicas alone.
         log.append(new LogEntry(disk.currentTerm(), log.lastIndex() + 1, new Command.Noop()));
@@ -262,12 +324,37 @@ public final class RaftNode {
         scheduleHeartbeat();
     }
 
+    /**
+     * Every {@code electionTimeoutMin}, a check-quorum leader makes sure a majority (counting
+     * itself) answered in that window. If not it is probably on the minority side of a partition:
+     * it steps down instead of accepting writes it can never commit, and stops holding the lease.
+     */
+    private void scheduleCheckQuorum() {
+        cancel(checkQuorumTimer);
+        checkQuorumTimer = after(config.electionTimeoutMin(), () -> {
+            if (role != Role.LEADER) {
+                return;
+            }
+            int reachable = recentlyActive.size() + 1;
+            recentlyActive.clear();
+            if (reachable < majority()) {
+                listener.onLostQuorum(this, reachable);
+                leaderId = -1;
+                stepDown(disk.currentTerm());
+                return;
+            }
+            scheduleCheckQuorum();
+        });
+    }
+
     /** Adopts {@code term} if newer and falls back to follower. */
     private void stepDown(long term) {
         disk.advanceTerm(term);
+        preVoteTerm = 0;
         if (role != Role.FOLLOWER) {
             boolean wasLeader = role == Role.LEADER;
             cancel(heartbeatTimer);
+            cancel(checkQuorumTimer);
             setRole(Role.FOLLOWER);
             if (wasLeader) {
                 resetElectionTimer();
@@ -282,7 +369,7 @@ public final class RaftNode {
     }
 
     private void handle(int from, Message message) {
-        if (message instanceof Message.RaftRpc rpc && rpc.term() > disk.currentTerm()) {
+        if (message instanceof Message.RaftRpc rpc && rpc.term() > disk.currentTerm() && adoptsTermOf(rpc)) {
             stepDown(rpc.term());
         }
         switch (message) {
@@ -297,6 +384,21 @@ public final class RaftNode {
         }
     }
 
+    /**
+     * Whether a message from a newer term should make us adopt that term. Pre-vote traffic never
+     * does (its term is only proposed), and with check-quorum neither does a vote request that
+     * arrives while we still trust a live leader: that candidate is most likely a node that was
+     * cut off and is now coming back, and letting it bump everyone's term would depose a healthy
+     * leader for nothing.
+     */
+    private boolean adoptsTermOf(Message.RaftRpc rpc) {
+        return switch (rpc) {
+            case RequestVote m -> !m.preVote() && !(config.checkQuorum() && inLeaderLease());
+            case RequestVoteReply m -> !(m.preVote() && m.granted());
+            default -> true;
+        };
+    }
+
     // ---------------------------------------------------------------- elections
 
     private boolean candidateLogIsUpToDate(long lastLogTerm, long lastLogIndex) {
@@ -308,6 +410,15 @@ public final class RaftNode {
     }
 
     private void onRequestVote(int from, RequestVote m) {
+        if (m.preVote()) {
+            onPreVoteRequest(from, m);
+            return;
+        }
+        if (m.term() > disk.currentTerm()) {
+            // Only possible when adoptsTermOf refused the term: we are inside a leader lease.
+            send(from, new RequestVoteReply(disk.currentTerm(), false));
+            return;
+        }
         boolean granted = false;
         if (m.term() == disk.currentTerm()
                 && (disk.votedFor() == PersistentState.NO_VOTE || disk.votedFor() == m.candidateId())
@@ -319,7 +430,25 @@ public final class RaftNode {
         send(from, new RequestVoteReply(disk.currentTerm(), granted));
     }
 
+    /** Answers "would you vote for me?" without changing any state of our own. */
+    private void onPreVoteRequest(int from, RequestVote m) {
+        boolean granted = m.term() > disk.currentTerm()
+                && candidateLogIsUpToDate(m.lastLogTerm(), m.lastLogIndex())
+                && !inLeaderLease();
+        send(from, new RequestVoteReply(granted ? m.term() : disk.currentTerm(), granted, true));
+    }
+
     private void onRequestVoteReply(int from, RequestVoteReply m) {
+        if (m.preVote()) {
+            if (preVoteTerm != 0 && role != Role.LEADER && m.granted() && m.term() == preVoteTerm
+                    && preVoteTerm == disk.currentTerm() + 1) {
+                preVotes.add(from);
+                if (preVotes.size() >= majority()) {
+                    startElection();
+                }
+            }
+            return;
+        }
         if (role != Role.CANDIDATE || m.term() != disk.currentTerm() || !m.granted()) {
             return;
         }
@@ -341,6 +470,8 @@ public final class RaftNode {
             stepDown(m.term()); // a candidate that hears from this term's leader gives up
         }
         leaderId = m.leaderId();
+        lastLeaderContact = sim.now();
+        preVoteTerm = 0;
         resetElectionTimer();
 
         RaftLog log = disk.log();
@@ -411,6 +542,7 @@ public final class RaftNode {
         if (role != Role.LEADER || m.term() != disk.currentTerm()) {
             return;
         }
+        recentlyActive.add(from);
         RaftLog log = disk.log();
         long match = matchIndex.get(from);
         if (m.success()) {
@@ -495,6 +627,8 @@ public final class RaftNode {
             stepDown(m.term());
         }
         leaderId = m.leaderId();
+        lastLeaderContact = sim.now();
+        preVoteTerm = 0;
         resetElectionTimer();
         long index = m.lastIncludedIndex();
         if (index > commitIndex) {
@@ -518,6 +652,7 @@ public final class RaftNode {
         if (role != Role.LEADER || m.term() != disk.currentTerm()) {
             return;
         }
+        recentlyActive.add(from);
         long match = Math.max(matchIndex.get(from), m.matchIndex());
         matchIndex.put(from, match);
         nextIndex.put(from, Math.max(nextIndex.get(from), match + 1));

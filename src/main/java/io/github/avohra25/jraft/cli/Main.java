@@ -10,7 +10,7 @@ import io.github.avohra25.jraft.harness.Cluster;
 import io.github.avohra25.jraft.raft.RaftNode;
 import io.github.avohra25.jraft.sim.Network;
 
-/** {@code jraft-sim [--scenario NAME] [--seed N] [--nodes N] [--duration MS] [--verbose] [--unsafe-commit]} */
+/** {@code jraft-sim [--scenario NAME] [--seed N] [--nodes N] [--duration MS] [--verbose] [--prevote] [--check-quorum] [--unsafe-commit]} */
 public final class Main {
 
     private Main() {}
@@ -27,6 +27,8 @@ public final class Main {
         long duration = 6_000;
         boolean verbose = false;
         boolean unsafeCommit = false;
+        boolean preVote = false;
+        boolean checkQuorum = false;
         Iterator<String> it = Arrays.asList(args).iterator();
         try {
             while (it.hasNext()) {
@@ -38,6 +40,8 @@ public final class Main {
                     case "-d", "--duration" -> duration = Long.parseLong(value(it, arg));
                     case "-v", "--verbose" -> verbose = true;
                     case "--unsafe-commit" -> unsafeCommit = true;
+                    case "--prevote" -> preVote = true;
+                    case "--check-quorum" -> checkQuorum = true;
                     case "-l", "--list" -> {
                         for (Scenario s : Scenario.values()) {
                             out.printf("  %-10s %s%n", s.cliName(), s.description());
@@ -65,8 +69,12 @@ public final class Main {
         if (unsafeCommit) {
             out.println("WARNING: --unsafe-commit lets leaders commit old-term entries by counting replicas (Figure 8 bug)");
         }
+        if (preVote || checkQuorum) {
+            out.println("enabled: " + (preVote ? "pre-vote" : "") + (preVote && checkQuorum ? ", " : "")
+                    + (checkQuorum ? "check-quorum" : ""));
+        }
         out.printf("seed %d, %d nodes, %dms of simulated time%n%n", seed, nodes, duration);
-        Scenario.Report report = scenario.run(new Scenario.Options(seed, nodes, duration, verbose, unsafeCommit));
+        Scenario.Report report = scenario.run(new Scenario.Options(seed, nodes, duration, verbose, unsafeCommit, preVote, checkQuorum));
         Cluster cluster = report.cluster();
         out.print(cluster.timeline().render());
         out.println();
@@ -118,6 +126,8 @@ public final class Main {
                   -n, --nodes N         cluster size, 1-9 (default 5)
                   -d, --duration MS     simulated milliseconds of workload (default 6000)
                   -v, --verbose         also show every completed client operation
+                      --prevote         ask for pre-votes before starting an election
+                      --check-quorum    leaders step down without a majority; leader lease on votes
                       --unsafe-commit   break the commit rule on purpose (Figure 8 bug) to see the
                                         checkers report it
                   -l, --list            list scenarios""");

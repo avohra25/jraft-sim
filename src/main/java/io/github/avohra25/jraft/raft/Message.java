@@ -12,9 +12,24 @@ public sealed interface Message {
         long term();
     }
 
-    record RequestVote(long term, int candidateId, long lastLogIndex, long lastLogTerm) implements RaftRpc {}
+    /**
+     * With {@code preVote} set this only asks "would you vote for me in {@code term}?": the
+     * receiver changes no state, and {@code term} is the term the sender would campaign in, not
+     * one it has adopted.
+     */
+    record RequestVote(long term, int candidateId, long lastLogIndex, long lastLogTerm, boolean preVote)
+            implements RaftRpc {
+        public RequestVote(long term, int candidateId, long lastLogIndex, long lastLogTerm) {
+            this(term, candidateId, lastLogIndex, lastLogTerm, false);
+        }
+    }
 
-    record RequestVoteReply(long term, boolean granted) implements RaftRpc {}
+    /** A granted pre-vote echoes the proposed term; every other reply carries the voter's term. */
+    record RequestVoteReply(long term, boolean granted, boolean preVote) implements RaftRpc {
+        public RequestVoteReply(long term, boolean granted) {
+            this(term, granted, false);
+        }
+    }
 
     record AppendEntries(long term, int leaderId, long prevLogIndex, long prevLogTerm,
                          List<LogEntry> entries, long leaderCommit) implements RaftRpc {

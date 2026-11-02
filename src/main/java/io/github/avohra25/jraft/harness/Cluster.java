@@ -342,6 +342,17 @@ public final class Cluster implements RaftListener {
     }
 
     @Override
+    public void onPreVote(RaftNode node, long term) {
+        timeline.add(sim.now(), "n" + node.id(), "election timeout -> asking for pre-votes for term " + term);
+    }
+
+    @Override
+    public void onLostQuorum(RaftNode leader, int reachable) {
+        timeline.add(sim.now(), "n" + leader.id(), "heard from only " + reachable + " of " + leader.clusterSize()
+                + " nodes -> giving up leadership (check-quorum)");
+    }
+
+    @Override
     public void onLeaderCommit(RaftNode leader, long commitIndex) {
         checker.onLeaderCommit(leader, commitIndex);
     }
